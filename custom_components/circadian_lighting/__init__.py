@@ -136,6 +136,7 @@ class CircadianLighting(object):
         self.data['interval'] = interval
         self.data['transition'] = transition
         self.data['percent'] = self.calc_percent()
+        self.data['bright_percent'] = self.calc_bright_percent()
         self.data['colortemp'] = self.calc_colortemp()
         self.data['rgb_color'] = self.calc_rgb()
         self.data['xy_color'] = self.calc_xy()
@@ -153,6 +154,26 @@ class CircadianLighting(object):
             track_sunset(self.hass, self._update, self.data['sunset_offset'])
 
     def get_sunrise_sunset(self, date = None):
+        import astral
+        location = astral.Location()
+        location.name = 'name'
+        location.region = 'region'
+        location.latitude = self.data['latitude']
+        location.longitude = self.data['longitude']
+        location.elevation = self.data['elevation']
+        _LOGGER.debug("Astral location: " + str(location))
+        sunrise = location.sunrise(date)
+        sunset = location.sunset(date)
+        solar_noon = location.solar_noon(date)
+        solar_midnight = location.solar_midnight(date)
+        return {
+            SUN_EVENT_SUNRISE: sunrise,
+            SUN_EVENT_SUNSET: sunset,
+            'solar_noon': solar_noon,
+            'solar_midnight': solar_midnight
+        }
+
+    def get_bright_sunrise_sunset(self, date = None):
         if self.data['sunrise_time'] is not None and self.data['sunset_time'] is not None:
             if date is None:
                 utcdate = dt_utcnow()
@@ -169,7 +190,7 @@ class CircadianLighting(object):
             location.latitude = self.data['latitude']
             location.longitude = self.data['longitude']
             location.elevation = self.data['elevation']
-            _LOGGER.debug("Astral location: " + str(location))
+            _LOGGER.debug("bright Astral location: " + str(location))
             if self.data['sunrise_time'] is not None:
                 if date is None:
                     utcdate = dt_utcnow()
@@ -276,6 +297,85 @@ class CircadianLighting(object):
 
         return percentage
 
+    def calc_bright_percent(self):
+        utcnow = dt_utcnow()
+        now = as_local(utcnow)
+        _LOGGER.debug("bright now: " + str(now))
+
+        today_sun_times = self.get_bright_sunrise_sunset(now)
+        _LOGGER.debug("bright today_sun_times: " + str(today_sun_times))
+
+        # Convert everything to epoch timestamps for easy calculation
+        now_seconds = now.timestamp()
+        sunrise_seconds = today_sun_times[SUN_EVENT_SUNRISE].timestamp()
+        sunset_seconds = today_sun_times[SUN_EVENT_SUNSET].timestamp()
+        solar_noon_seconds = today_sun_times['solar_noon'].timestamp()
+        solar_midnight_seconds = today_sun_times['solar_midnight'].timestamp()
+
+        if now < today_sun_times[SUN_EVENT_SUNRISE]: # It's before sunrise (after midnight)
+            # Because it's before sunrise (and after midnight) sunset must have happend yesterday
+            yesterday_sun_times = self.get_bright_sunrise_sunset(now - timedelta(days=1))
+            _LOGGER.debug("bright yesterday_sun_times: " + str(yesterday_sun_times))
+            sunset_seconds = yesterday_sun_times[SUN_EVENT_SUNSET].timestamp()
+            if today_sun_times['solar_midnight'] > today_sun_times[SUN_EVENT_SUNSET] and yesterday_sun_times['solar_midnight'] > yesterday_sun_times[SUN_EVENT_SUNSET]:
+                # Solar midnight is after sunset so use yesterdays's time
+                solar_midnight_seconds = yesterday_sun_times['solar_midnight'].timestamp()
+        elif now > today_sun_times[SUN_EVENT_SUNSET]: # It's after sunset (before midnight)
+            # Because it's after sunset (and before midnight) sunrise should happen tomorrow
+            tomorrow_sun_times = self.get_bright_sunrise_sunset(now + timedelta(days=1))
+            _LOGGER.debug("bright tomorrow_sun_times: " + str(tomorrow_sun_times))
+            sunrise_seconds = tomorrow_sun_times[SUN_EVENT_SUNRISE].timestamp()
+            if today_sun_times['solar_midnight'] < today_sun_times[SUN_EVENT_SUNRISE] and tomorrow_sun_times['solar_midnight'] < tomorrow_sun_times[SUN_EVENT_SUNRISE]:
+                # Solar midnight is before sunrise so use tomorrow's time
+                solar_midnight_seconds = tomorrow_sun_times['solar_midnight'].timestamp()
+
+        _LOGGER.debug("bright now_seconds: " + str(now_seconds))
+        _LOGGER.debug("bright sunrise_seconds: " + str(sunrise_seconds))
+        _LOGGER.debug("bright sunset_seconds: " + str(sunset_seconds))
+        _LOGGER.debug("bright solar_midnight_seconds: " + str(solar_midnight_seconds))
+        _LOGGER.debug("bright solar_noon_seconds: " + str(solar_noon_seconds))
+
+        # Figure out where we are in time so we know which half of the parabola to calculate
+        # We're generating a different sunset-sunrise parabola for before and after solar midnight
+        # because it might not be half way between sunrise and sunset
+        # We're also (obviously) generating a different parabola for sunrise-sunset
+
+        # sunrise-sunset parabola
+        if now_seconds > sunrise_seconds and now_seconds < sunset_seconds:
+            h = solar_noon_seconds
+            k = 100
+            # parabola before solar_noon
+            if now_seconds < solar_noon_seconds:
+                x = sunrise_seconds
+            # parabola after solar_noon
+            else:
+                x = sunset_seconds
+            y = 0
+
+        # sunset_sunrise parabola
+        elif now_seconds > sunset_seconds and now_seconds < sunrise_seconds:
+            h = solar_midnight_seconds
+            k = -100
+            # parabola before solar_midnight
+            if now_seconds < solar_midnight_seconds:
+                x = sunset_seconds
+            # parabola after solar_midnight
+            else:
+                x = sunrise_seconds
+            y = 0
+
+        a = (y-k)/(h-x)**2
+        percentage = a*(now_seconds-h)**2+k
+
+        _LOGGER.debug("bright h: " + str(h))
+        _LOGGER.debug("bright k: " + str(k))
+        _LOGGER.debug("bright x: " + str(x))
+        _LOGGER.debug("bright y: " + str(y))
+        _LOGGER.debug("bright a: " + str(a))
+        _LOGGER.debug("bright percentage: " + str(percentage))
+
+        return percentage
+
     def calc_colortemp(self):
         if self.data['percent'] > 0:
             return ((self.data['max_colortemp'] - self.data['min_colortemp']) * (self.data['percent'] / 100)) + self.data['min_colortemp']
@@ -303,6 +403,7 @@ class CircadianLighting(object):
     def _update(self, *args, **kwargs):
         """Update Circadian Values."""
         self.data['percent'] = self.calc_percent()
+        self.data['bright_percent'] = self.calc_bright_percent()
         self.data['colortemp'] = self.calc_colortemp()
         self.data['rgb_color'] = self.calc_rgb()
         self.data['xy_color'] = self.calc_xy()

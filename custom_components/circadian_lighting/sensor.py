@@ -46,6 +46,7 @@ class CircadianSensor(Entity):
         self._icon = ICON
         self._hs_color = self._cl.data['hs_color']
         self._attributes = {}
+        self._attributes['bright_percent'] = self._cl.data['bright_percent']
         self._attributes['colortemp'] = self._cl.data['colortemp']
         self._attributes['rgb_color'] = self._cl.data['rgb_color']
         self._attributes['xy_color'] = self._cl.data['xy_color']
